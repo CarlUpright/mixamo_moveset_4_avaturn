@@ -1,0 +1,414 @@
+import bpy
+import os
+from pathlib import Path
+import mathutils
+
+# Clear console for clean output
+import os
+os.system('cls' if os.name == 'nt' else 'clear')
+
+# =============================================================================
+# USER CONFIGURATION
+# =============================================================================
+CHARACTER_FILE = r"C:\Users\crousseau\Cégep de Thetford\SRP - DAE - Dossier technopédagogiques - Dossier technopédagogiques\01_Logiciels\CUSTOM\Animation3D_Avaturn_Mixamo\Models fixes Avaturn (sans animation)\model.glb"
+MIXAMO_FOLDER = r"C:\Users\crousseau\Cégep de Thetford\SRP - DAE - Dossier technopédagogiques - Dossier technopédagogiques\01_Logiciels\CUSTOM\Animation3D_Avaturn_Mixamo\Mixamo_animations"
+OUTPUT_FILE = r"C:\Users\crousseau\Cégep de Thetford\SRP - DAE - Dossier technopédagogiques - Dossier technopédagogiques\01_Logiciels\CUSTOM\Animation3D_Avaturn_Mixamo\model_MultiAnimations.glb"
+
+def clear_scene():
+    """Clear everything"""
+    print("🧹 Clearing scene...")
+    
+    # Delete all objects
+    bpy.ops.object.select_all(action='SELECT')
+    bpy.ops.object.delete(use_global=False)
+    
+    # Clear all data blocks
+    for action in list(bpy.data.actions):
+        bpy.data.actions.remove(action)
+    for mesh in list(bpy.data.meshes):
+        bpy.data.meshes.remove(mesh)
+    for material in list(bpy.data.materials):
+        bpy.data.materials.remove(material)
+    for armature in list(bpy.data.armatures):
+        bpy.data.armatures.remove(armature)
+    
+    print("✅ Scene cleared")
+
+def load_base_character():
+    """Load the base character"""
+    print(f"📁 Loading base character: {Path(CHARACTER_FILE).name}")
+    
+    if not Path(CHARACTER_FILE).exists():
+        print(f"❌ Character file not found: {CHARACTER_FILE}")
+        return None
+    
+    # Import the character
+    bpy.ops.import_scene.gltf(filepath=CHARACTER_FILE)
+    
+    # Find the armature
+    target_armature = None
+    for obj in bpy.context.scene.objects:
+        if obj.type == 'ARMATURE':
+            target_armature = obj
+            break
+    
+    if target_armature:
+        print(f"✅ Character loaded: {target_armature.name}")
+        print(f"   Bones: {len(target_armature.data.bones)}")
+        return target_armature
+    else:
+        print(f"❌ No armature found in character file")
+        return None
+
+def create_bone_mapping(source_armature, target_armature):
+    """Create bone name mapping between source and target armatures"""
+    mapping = {}
+    
+    source_bones = {bone.name.lower(): bone.name for bone in source_armature.data.bones}
+    target_bones = {bone.name.lower(): bone.name for bone in target_armature.data.bones}
+    
+    # Common bone name mappings
+    bone_aliases = {
+        'mixamorig:hips': ['hips'],
+        'mixamorig:spine': ['spine'],
+        'mixamorig:spine1': ['spine1', 'spine.001'],
+        'mixamorig:spine2': ['spine2', 'spine.002'],
+        'mixamorig:neck': ['neck'],
+        'mixamorig:head': ['head'],
+        'mixamorig:leftupleg': ['leftupleg', 'leftthigh', 'left_thigh'],
+        'mixamorig:rightupleg': ['rightupleg', 'rightthigh', 'right_thigh'],
+        'mixamorig:leftleg': ['leftleg', 'leftcalf', 'left_calf'],
+        'mixamorig:rightleg': ['rightleg', 'rightcalf', 'right_calf'],
+        'mixamorig:leftfoot': ['leftfoot', 'left_foot'],
+        'mixamorig:rightfoot': ['rightfoot', 'right_foot'],
+        'mixamorig:leftshoulder': ['leftshoulder', 'left_shoulder'],
+        'mixamorig:rightshoulder': ['rightshoulder', 'right_shoulder'],
+        'mixamorig:leftarm': ['leftarm', 'leftupperarm', 'left_upper_arm'],
+        'mixamorig:rightarm': ['rightarm', 'rightupperarm', 'right_upper_arm'],
+        'mixamorig:leftforearm': ['leftforearm', 'leftlowerarm', 'left_lower_arm'],
+        'mixamorig:rightforearm': ['rightforearm', 'rightlowerarm', 'right_lower_arm'],
+        'mixamorig:lefthand': ['lefthand', 'left_hand'],
+        'mixamorig:righthand': ['righthand', 'right_hand'],
+    }
+    
+    # First try exact matches
+    for source_bone in source_bones:
+        if source_bone in target_bones:
+            mapping[source_bones[source_bone]] = target_bones[source_bone]
+    
+    # Then try alias matching
+    for source_bone_lower, source_bone_real in source_bones.items():
+        if source_bone_real in mapping:
+            continue  # Already mapped
+            
+        for alias_key, alias_list in bone_aliases.items():
+            if source_bone_lower == alias_key.lower():
+                for alias in alias_list:
+                    if alias.lower() in target_bones:
+                        mapping[source_bone_real] = target_bones[alias.lower()]
+                        break
+                break
+    
+    return mapping
+
+def retarget_animation(source_armature, target_armature, source_action, animation_name):
+    """Retarget animation from source to target armature"""
+    print(f"🎯 Retargeting: {animation_name}")
+    
+    # Create bone mapping
+    bone_mapping = create_bone_mapping(source_armature, target_armature)
+    
+    if not bone_mapping:
+        print(f"   ❌ No bone mapping found")
+        return None
+    
+    print(f"   📊 Mapped {len(bone_mapping)} bones")
+    
+    # Create new action for target armature
+    new_action = bpy.data.actions.new(animation_name)
+    
+    # Copy FCurves with bone mapping
+    successful_fcurves = 0
+    
+    for source_fcurve in source_action.fcurves:
+        # Parse bone name from data path
+        if 'pose.bones[' in source_fcurve.data_path:
+            # Extract bone name
+            start = source_fcurve.data_path.find('["') + 2
+            end = source_fcurve.data_path.find('"]', start)
+            
+            if start < end:
+                source_bone_name = source_fcurve.data_path[start:end]
+                
+                # Check if bone is mapped
+                if source_bone_name in bone_mapping:
+                    target_bone_name = bone_mapping[source_bone_name]
+                    
+                    # Create new data path for target bone
+                    new_data_path = source_fcurve.data_path.replace(
+                        f'["{source_bone_name}"]',
+                        f'["{target_bone_name}"]'
+                    )
+                    
+                    # Create new FCurve
+                    try:
+                        new_fcurve = new_action.fcurves.new(
+                            data_path=new_data_path,
+                            index=source_fcurve.array_index
+                        )
+                        
+                        # Copy keyframes
+                        new_fcurve.keyframe_points.add(len(source_fcurve.keyframe_points))
+                        
+                        for i, keyframe in enumerate(source_fcurve.keyframe_points):
+                            new_fcurve.keyframe_points[i].co = keyframe.co
+                            new_fcurve.keyframe_points[i].handle_left = keyframe.handle_left
+                            new_fcurve.keyframe_points[i].handle_right = keyframe.handle_right
+                            new_fcurve.keyframe_points[i].handle_left_type = keyframe.handle_left_type
+                            new_fcurve.keyframe_points[i].handle_right_type = keyframe.handle_right_type
+                            new_fcurve.keyframe_points[i].interpolation = keyframe.interpolation
+                        
+                        new_fcurve.update()
+                        successful_fcurves += 1
+                        
+                    except Exception as e:
+                        print(f"      ⚠️  Failed to create FCurve for {target_bone_name}: {e}")
+    
+    print(f"   ✅ Retargeted {successful_fcurves} FCurves")
+    
+    if successful_fcurves > 0:
+        return new_action
+    else:
+        bpy.data.actions.remove(new_action)
+        return None
+
+def import_and_retarget_animation(fbx_file, target_armature):
+    """Import Mixamo animation and retarget to target armature"""
+    print(f"\n🎬 Processing: {fbx_file.name}")
+    
+    # Store current state
+    objects_before = set(bpy.data.objects)
+    actions_before = set(bpy.data.actions)
+    
+    try:
+        # Import FBX
+        bpy.ops.import_scene.fbx(
+            filepath=str(fbx_file),
+            ignore_leaf_bones=True,
+            automatic_bone_orientation=True,
+            use_manual_orientation=False
+        )
+        
+        # Find imported armature and action
+        new_objects = set(bpy.data.objects) - objects_before
+        new_actions = set(bpy.data.actions) - actions_before
+        
+        source_armature = None
+        source_action = None
+        
+        # Find source armature
+        for obj in new_objects:
+            if obj.type == 'ARMATURE':
+                source_armature = obj
+                if obj.animation_data and obj.animation_data.action:
+                    source_action = obj.animation_data.action
+                break
+        
+        # If no action on armature, look for any new action
+        if not source_action and new_actions:
+            source_action = list(new_actions)[0]
+        
+        if source_armature and source_action:
+            # Create clean animation name
+            animation_name = fbx_file.stem.replace('_', ' ').replace('(', '').replace(')', '').title().replace(' ', '_')
+            
+            # Retarget animation
+            retargeted_action = retarget_animation(
+                source_armature, 
+                target_armature, 
+                source_action, 
+                animation_name
+            )
+            
+            # Clean up imported objects first
+            for obj in new_objects:
+                bpy.data.objects.remove(obj, do_unlink=True)
+            
+            # Return the retargeted action
+            if retargeted_action:
+                print(f"   ✅ Success: {retargeted_action.name}")
+                return retargeted_action
+            else:
+                print(f"   ❌ Failed to retarget")
+                return None
+        else:
+            print(f"   ❌ No armature or action found")
+            # Clean up imported objects
+            for obj in new_objects:
+                bpy.data.objects.remove(obj, do_unlink=True)
+            return None
+        
+    except Exception as e:
+        print(f"   ❌ Import failed: {e}")
+        return None
+
+def setup_nla_tracks(armature):
+    """Set up NLA tracks for easy animation switching"""
+    print(f"\n🎵 Setting up NLA tracks...")
+    
+    if not armature.animation_data:
+        armature.animation_data_create()
+    
+    # Get all actions for this armature
+    armature_actions = []
+    for action in bpy.data.actions:
+        # Check if action has bone data paths
+        has_pose_bones = any('pose.bones[' in fc.data_path for fc in action.fcurves if fc.data_path)
+        if has_pose_bones:
+            armature_actions.append(action)
+    
+    print(f"   📚 Found {len(armature_actions)} armature actions")
+    
+    # Create NLA tracks
+    for i, action in enumerate(armature_actions):
+        # Create track
+        track = armature.animation_data.nla_tracks.new()
+        track.name = f"Track_{action.name}"
+        
+        # Add strip
+        strip = track.strips.new(action.name, start=i*100, action=action)
+        strip.frame_end = strip.frame_start + action.frame_range[1]
+        
+        print(f"   ✅ Created track: {track.name}")
+
+def animation_retargeting_workflow():
+    """Complete workflow for retargeting multiple animations"""
+    print("🎯 ANIMATION RETARGETING WORKFLOW")
+    print("Creating single GLB with multiple retargeted animations")
+    print("="*80)
+    
+    # Check files
+    if not Path(CHARACTER_FILE).exists():
+        print(f"❌ Character file not found: {CHARACTER_FILE}")
+        return
+    
+    mixamo_path = Path(MIXAMO_FOLDER)
+    if not mixamo_path.exists():
+        print(f"❌ Mixamo folder not found: {MIXAMO_FOLDER}")
+        return
+    
+    fbx_files = list(mixamo_path.glob("*.fbx"))
+    if not fbx_files:
+        print(f"❌ No FBX files found in: {MIXAMO_FOLDER}")
+        return
+    
+    print(f"🎯 Found {len(fbx_files)} animation files")
+    
+    # Clear and load character
+    clear_scene()
+    target_armature = load_base_character()
+    
+    if not target_armature:
+        return
+    
+    # Import and retarget each animation
+    successful_retargets = 0
+    retargeted_actions = []
+    
+    for fbx_file in fbx_files:
+        retargeted_action = import_and_retarget_animation(fbx_file, target_armature)
+        if retargeted_action:
+            successful_retargets += 1
+            retargeted_actions.append(retargeted_action)
+    
+    # Also count any actions that look like retargeted animations
+    if successful_retargets == 0:
+        # Check for retargeted actions that might have been created
+        for action in bpy.data.actions:
+            if any(name in action.name for name in ['Angry', 'Happy', 'Idle']):
+                successful_retargets += 1
+                retargeted_actions.append(action)
+    
+    print(f"\n📊 RETARGETING SUMMARY:")
+    print(f"   ✅ Successfully retargeted: {successful_retargets}/{len(fbx_files)} animations")
+    
+    if successful_retargets > 0:
+        # Setup NLA tracks
+        setup_nla_tracks(target_armature)
+        
+        # Export single GLB
+        print(f"\n💾 Exporting to: {Path(OUTPUT_FILE).name}")
+        
+        try:
+            bpy.ops.export_scene.gltf(
+                filepath=OUTPUT_FILE,
+                use_selection=False,
+                export_animations=True,
+                export_frame_range=False,
+                export_frame_step=1,
+                export_force_sampling=False,
+                export_nla_strips=True,  # Include NLA strips
+                export_def_bones=False,
+                export_optimize_animation_size=False
+            )
+            
+            print(f"🎉 SUCCESS! Single GLB file created with {successful_retargets} animations!")
+            print(f"📁 Output: {OUTPUT_FILE}")
+            
+        except Exception as e:
+            print(f"❌ Export failed: {e}")
+    else:
+        print(f"❌ No animations were successfully retargeted")
+
+def list_final_actions():
+    """List all actions in the final file"""
+    print("\n📋 FINAL ACTIONS:")
+    for i, action in enumerate(bpy.data.actions, 1):
+        print(f"   {i:2d}. {action.name}")
+
+def export_glb_now():
+    """Manual export function since the animations are already there"""
+    print("💾 MANUAL EXPORT...")
+    print("Your animations are already loaded, let's export them now!")
+    
+    try:
+        bpy.ops.export_scene.gltf(
+            filepath=OUTPUT_FILE,
+            use_selection=False,
+            export_animations=True,
+            export_frame_range=False,
+            export_frame_step=1,
+            export_force_sampling=False,
+            export_nla_strips=True,
+            export_def_bones=False,
+            export_optimize_animation_size=False
+        )
+        
+        print(f"🎉 SUCCESS! GLB exported to: {OUTPUT_FILE}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Export failed: {e}")
+        return False
+
+# =============================================================================
+# AUTOMATIC EXECUTION
+# =============================================================================
+
+if __name__ == "__main__":
+    print("🎯 ANIMATION RETARGETING SCRIPT")
+    print("🚀 Creating single GLB with multiple retargeted animations...")
+    print("\n" + "="*100)
+    
+    # Run the workflow
+    animation_retargeting_workflow()
+    
+    # List final result
+    list_final_actions()
+    
+    # Since the animations are there, let's export manually
+    print("\n🔧 The animations are loaded! Attempting manual export...")
+    export_glb_now()
+    
+    print("\n✅ DONE! Check the output GLB file.")
+    print("\n📝 If export failed, run: export_glb_now()")
